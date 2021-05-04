@@ -90,7 +90,7 @@ limitations under the License.
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>bigtable-hbase-beam</artifactId>
-      <version>${project.version}</version>
+      <version>1.19.3-SNAPSHOT</version>
       <exclusions>
         <exclusion>
           <groupId>org.apache.hbase</groupId>
@@ -102,7 +102,7 @@ limitations under the License.
     <dependency>
       <groupId>com.google.cloud.bigtable</groupId>
       <artifactId>bigtable-hbase-1.x-shaded</artifactId>
-      <version>${project.version}</version>
+      <version>1.19.3-SNAPSHOT</version>
       <exclusions>
         <!-- exclude hbase-shaded-client since we are using hbase-shaded-server -->
         <exclusion>
