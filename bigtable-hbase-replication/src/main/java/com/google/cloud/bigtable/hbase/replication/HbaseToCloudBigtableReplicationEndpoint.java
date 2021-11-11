@@ -165,25 +165,23 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
           entries.stream()
               .collect(groupingBy(entry -> entry.getKey().getTablename().getNameAsString()));
 
-      for (Map.Entry<String, List<WAL.Entry>> walEntriesForTable : walEntriesByTable.entrySet()) {
-        final String tableName = walEntriesForTable.getKey();
-        // TODO: MAKE IT PARALLEL
+      walEntriesByTable.entrySet().parallelStream().forEach(walEntries -> {
+        final String tableName = walEntries.getKey();
         try {
-          boolean result =
-              replicatorFactory.getReplicator(tableName)
-                  .replicateTable(walEntriesForTable.getValue());
-          if (!result) {
+          boolean res = replicatorFactory.getReplicator(tableName).replicateTable(walEntries.getValue());
+          if (!res) {
             LOG.error(
-                "Table replicator returned false in CBT replicate. " + tableName + " failed.");
+                    "Table replicator returned false in CBT replicate. " + tableName + " failed.");
           }
           // The overall operation is successful only if all the calls are successful.
-          succeeded.set(result & succeeded.get());
+          succeeded.set(res & succeeded.get());
         } catch (IOException e) {
           LOG.error("Got IOException from table replicator: ", e);
           // Suppress the exception here and return false to the replication machinery.
           succeeded.set(false);
         }
-      } // Top level loop exiting
+
+      });
     } catch (Exception e) {
       LOG.error("Failed to replicate some  WAL with exception: ", e);
       succeeded.set(false);
