@@ -180,7 +180,6 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
           // Suppress the exception here and return false to the replication machinery.
           succeeded.set(false);
         }
-
       });
     } catch (Exception e) {
       LOG.error("Failed to replicate some  WAL with exception: ", e);
