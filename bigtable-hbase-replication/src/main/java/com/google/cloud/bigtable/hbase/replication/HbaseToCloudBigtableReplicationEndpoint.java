@@ -168,10 +168,11 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
       walEntriesByTable.entrySet().parallelStream().forEach(walEntries -> {
         final String tableName = walEntries.getKey();
         try {
-          boolean res = replicatorFactory.getReplicator(tableName).replicateTable(walEntries.getValue());
+          boolean res = replicatorFactory.getReplicator(tableName)
+              .replicateTable(walEntries.getValue());
           if (!res) {
             LOG.error(
-                    "Table replicator returned false in CBT replicate. " + tableName + " failed.");
+                "Table replicator returned false in CBT replicate. " + tableName + " failed.");
           }
           // The overall operation is successful only if all the calls are successful.
           succeeded.set(res & succeeded.get());
