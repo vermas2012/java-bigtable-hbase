@@ -43,7 +43,7 @@ import org.slf4j.LoggerFactory;
 public class HbaseToCloudBigtableReplicationEndpointTest {
 
   private static final Logger LOG =
-          LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
+      LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
 
   public static final String ROW_KEY_PREFIX = "test-row-";
   public static final byte[] CF1 = "cf1".getBytes();
@@ -111,21 +111,21 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     // Setup Bigtable Emulator
     // Create the copy of HBase table in CBT. Replication will copy data into this "copy" CBT table.
     BigtableTableAdminClient tableAdminClient =
-            BigtableTableAdminClient.create(
-                    BigtableTableAdminSettings.newBuilderForEmulator(bigtableEmulator.getPort())
-                            .setProjectId("test-project")
-                            .setInstanceId("test-instance")
-                            .build());
+        BigtableTableAdminClient.create(
+            BigtableTableAdminSettings.newBuilderForEmulator(bigtableEmulator.getPort())
+                .setProjectId("test-project")
+                .setInstanceId("test-instance")
+                .build());
     tableAdminClient
-            .createTable(CreateTableRequest.of("replication-test").addFamily("cf1").addFamily("cf2"));
+        .createTable(CreateTableRequest.of("replication-test").addFamily("cf1").addFamily("cf2"));
     tableAdminClient
-            .createTable(CreateTableRequest.of(TABLE_NAME_2).addFamily("cf1").addFamily("cf2"));
+        .createTable(CreateTableRequest.of(TABLE_NAME_2).addFamily("cf1").addFamily("cf2"));
     cbtConnection = BigtableConfiguration.connect(conf);
 
     // Setup Replication in HBase mini cluster
     ReplicationPeerConfig peerConfig = new ReplicationPeerConfig();
     peerConfig
-            .setReplicationEndpointImpl(HbaseToCloudBigtableReplicationEndpoint.class.getTypeName());
+        .setReplicationEndpointImpl(HbaseToCloudBigtableReplicationEndpoint.class.getTypeName());
     // Cluster key is required, we don't really have a clusterKey for CBT.
     peerConfig.setClusterKey(hbaseTestingUtil.getClusterKey());
     replicationAdmin.addPeer("cbt", peerConfig);
@@ -146,7 +146,7 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     ReplicationPeerConfig peerConfig = replicationAdmin.getPeerConfig("cbt");
     Assert.assertNotNull(peerConfig);
     Assert.assertEquals(peerConfig.getReplicationEndpointImpl(),
-            HbaseToCloudBigtableReplicationEndpoint.class.getName());
+        HbaseToCloudBigtableReplicationEndpoint.class.getName());
 
   }
 
@@ -237,7 +237,7 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
       Assert.assertEquals(1, returnedCells.size());
       // Assert on cell contents
       Assert.assertEquals(0, Bytes.compareTo(
-              CellUtil.cloneFamily(returnedCells.get(0)), CF1));
+          CellUtil.cloneFamily(returnedCells.get(0)), CF1));
       Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(returnedCells.get(0)), COL_QUALIFIER));
       Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + rowStart).getBytes()));
       rowStart++;
