@@ -6,6 +6,7 @@ import com.google.bigtable.repackaged.com.google.cloud.bigtable.admin.v2.models.
 import com.google.cloud.bigtable.emulator.v2.BigtableEmulatorRule;
 import com.google.cloud.bigtable.hbase.BigtableConfiguration;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
@@ -42,11 +43,12 @@ import org.slf4j.LoggerFactory;
 public class HbaseToCloudBigtableReplicationEndpointTest {
 
   private static final Logger LOG =
-      LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
+          LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
 
   public static final String ROW_KEY_PREFIX = "test-row-";
   public static final byte[] CF1 = "cf1".getBytes();
   public static final String TABLE_NAME = "replication-test";
+  public static final String TABLE_NAME_2 = "replication-test-2";
   public static final byte[] COL_QUALIFIER = "col".getBytes();
   public static final String VALUE_PREFIX = "Value-";
 
@@ -95,27 +97,35 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     HColumnDescriptor cf2 = new HColumnDescriptor("cf2");
     htd.addFamily(cf2);
 
+    // Create table2 in Hbase
+    HTableDescriptor htd2 = hbaseTestingUtil.createTableDescriptor(TABLE_NAME_2);
+    htd2.addFamily(cf1);
+    htd2.addFamily(cf2);
+
     // Enables replication to all peers, including CBT
     cf1.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
     cf2.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
     hbaseTestingUtil.getHBaseAdmin().createTable(htd);
+    hbaseTestingUtil.getHBaseAdmin().createTable(htd2);
 
     // Setup Bigtable Emulator
     // Create the copy of HBase table in CBT. Replication will copy data into this "copy" CBT table.
     BigtableTableAdminClient tableAdminClient =
-        BigtableTableAdminClient.create(
-            BigtableTableAdminSettings.newBuilderForEmulator(bigtableEmulator.getPort())
-                .setProjectId("test-project")
-                .setInstanceId("test-instance")
-                .build());
+            BigtableTableAdminClient.create(
+                    BigtableTableAdminSettings.newBuilderForEmulator(bigtableEmulator.getPort())
+                            .setProjectId("test-project")
+                            .setInstanceId("test-instance")
+                            .build());
     tableAdminClient
-        .createTable(CreateTableRequest.of("replication-test").addFamily("cf1").addFamily("cf2"));
+            .createTable(CreateTableRequest.of("replication-test").addFamily("cf1").addFamily("cf2"));
+    tableAdminClient
+            .createTable(CreateTableRequest.of(TABLE_NAME_2).addFamily("cf1").addFamily("cf2"));
     cbtConnection = BigtableConfiguration.connect(conf);
 
     // Setup Replication in HBase mini cluster
     ReplicationPeerConfig peerConfig = new ReplicationPeerConfig();
     peerConfig
-        .setReplicationEndpointImpl(HbaseToCloudBigtableReplicationEndpoint.class.getTypeName());
+            .setReplicationEndpointImpl(HbaseToCloudBigtableReplicationEndpoint.class.getTypeName());
     // Cluster key is required, we don't really have a clusterKey for CBT.
     peerConfig.setClusterKey(hbaseTestingUtil.getClusterKey());
     replicationAdmin.addPeer("cbt", peerConfig);
@@ -136,7 +146,7 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     ReplicationPeerConfig peerConfig = replicationAdmin.getPeerConfig("cbt");
     Assert.assertNotNull(peerConfig);
     Assert.assertEquals(peerConfig.getReplicationEndpointImpl(),
-        HbaseToCloudBigtableReplicationEndpoint.class.getName());
+            HbaseToCloudBigtableReplicationEndpoint.class.getName());
 
   }
 
@@ -158,21 +168,7 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
 
     Table cbtTable = cbtConnection.getTable(TableName.valueOf(TABLE_NAME));
     int i =0;
-    for(Result result: cbtTable.getScanner(new Scan())){
-      LOG.error("Processing result: " + Bytes.toStringBinary(result.getRow()) + " cell: " + result.listCells().get(0).toString());
-      List<Cell> returnedCells = result.listCells();
-      Assert.assertEquals(0, Bytes.compareTo(result.getRow(), (ROW_KEY_PREFIX + i).getBytes()));
-      // Only 1 cell/row added in  HBase
-      Assert.assertEquals(1, returnedCells.size());
-      // Assert on cell contents
-      Assert.assertEquals(0, Bytes.compareTo(
-          CellUtil.cloneFamily(returnedCells.get(0)), CF1));
-      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(returnedCells.get(0)), COL_QUALIFIER));
-      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + i).getBytes()));
-      i++;
-    }
-    Assert.assertEquals(10, i);
-
+    assertResultRowsInCBT(cbtTable, 10, 0);
   }
 
   @Test
@@ -204,23 +200,49 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
 
 
     int i =1; // Row 0 has been deleted.
-    for(Result result: cbtTable.getScanner(new Scan())){
+    assertResultRowsInCBT(cbtTable, 5, 1);
+  }
+
+  //TODO create a multi column family
+  @Test
+  public void testMultiTableReplication() throws IOException, InterruptedException {
+    Table table1 = hbaseTestingUtil.getConnection().getTable(TableName.valueOf(TABLE_NAME));
+    Table table2 = hbaseTestingUtil.getConnection().getTable(TableName.valueOf(TABLE_NAME_2));
+    for (int i = 0; i < 10; i++) {
+      String rowKey = ROW_KEY_PREFIX + i;
+      Put put = new Put(rowKey.getBytes());
+      byte[] val = (VALUE_PREFIX + i).getBytes();
+      put.addColumn(CF1, COL_QUALIFIER, 0, val);
+      table1.put(put);
+      table2.put(put);
+    }
+
+    // Wait for replication to catch up
+    // TODO Find a better alternative than sleeping? Maybe disable replication or turnoff mini cluster
+    Thread.sleep(2000);
+    //   Waiter.waitFor(CONF, 60000, () -> TestEndpoint.getEntries().size() >= cellNum);
+
+    Table cbtTable = cbtConnection.getTable(TableName.valueOf(TABLE_NAME));
+    Table cbtTable2 = cbtConnection.getTable(TableName.valueOf(TABLE_NAME_2));
+    assertResultRowsInCBT(cbtTable, 10, 0);
+    assertResultRowsInCBT(cbtTable, 10, 0);
+  }
+
+  private void assertResultRowsInCBT(Table table, int rowRange, int rowStart) throws IOException {
+    for(Result result: table.getScanner(new Scan())){
       LOG.error("Processing result: " + Bytes.toStringBinary(result.getRow()) + " cell: " + result.listCells().get(0).toString());
       List<Cell> returnedCells = result.listCells();
-      Assert.assertEquals(0, Bytes.compareTo(result.getRow(), (ROW_KEY_PREFIX + i).getBytes()));
+      Assert.assertEquals(0, Bytes.compareTo(result.getRow(), (ROW_KEY_PREFIX + rowStart).getBytes()));
       // Only 1 cell/row added in  HBase
       Assert.assertEquals(1, returnedCells.size());
       // Assert on cell contents
       Assert.assertEquals(0, Bytes.compareTo(
-          CellUtil.cloneFamily(returnedCells.get(0)), CF1));
+              CellUtil.cloneFamily(returnedCells.get(0)), CF1));
       Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(returnedCells.get(0)), COL_QUALIFIER));
-      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + i).getBytes()));
-      i++;
+      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + rowStart).getBytes()));
+      rowStart++;
     }
-    // processed rows 1-4, end state will be 5
-    Assert.assertEquals(5, i);
+    Assert.assertEquals(rowRange, rowStart);
   }
-
-  //TODO create a multi column family and multi table tests.
 
 }
