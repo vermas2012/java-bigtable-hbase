@@ -6,8 +6,8 @@ import com.google.bigtable.repackaged.com.google.cloud.bigtable.admin.v2.models.
 import com.google.cloud.bigtable.emulator.v2.BigtableEmulatorRule;
 import com.google.cloud.bigtable.hbase.BigtableConfiguration;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
@@ -25,10 +25,13 @@ import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.replication.ReplicationAdmin;
 import org.apache.hadoop.hbase.ipc.RpcServer;
+import org.apache.hadoop.hbase.replication.ReplicationEndpoint;
 import org.apache.hadoop.hbase.replication.ReplicationException;
 import org.apache.hadoop.hbase.replication.ReplicationPeerConfig;
+import org.apache.hadoop.hbase.replication.TestReplicationEndpoint;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.ServerRegionReplicaUtil;
+import org.apache.hadoop.hbase.wal.WAL;
 import org.junit.After;
 import org.junit.Assert;
 import org.junit.Before;
@@ -36,19 +39,40 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.Mockito;
+import org.mockito.configuration.IMockitoConfiguration;
+import org.mockito.internal.matchers.Any;
+import org.mockito.stubbing.OngoingStubbing;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import static java.util.stream.Collectors.groupingBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.when;
 
 @RunWith(JUnit4.class)
 public class HbaseToCloudBigtableReplicationEndpointTest {
 
+  @InjectMocks
+  private CloudBigtableTableReplicatorFactory replicatorFactory;
+  @Mock
+  private CloudBigtableTableReplicator replicator;
+
+  // countDownLatch with 3 for parallel table writes test
+  private final CountDownLatch countDownLatch = new CountDownLatch(3);
+
+
   private static final Logger LOG =
-      LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
+      LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpointTest.class);
 
   public static final String ROW_KEY_PREFIX = "test-row-";
   public static final byte[] CF1 = "cf1".getBytes();
   public static final String TABLE_NAME = "replication-test";
   public static final String TABLE_NAME_2 = "replication-test-2";
+  public static final String TABLE_NAME_3 = "replication-test-3";
+
   public static final byte[] COL_QUALIFIER = "col".getBytes();
   public static final String VALUE_PREFIX = "Value-";
 
@@ -102,11 +126,18 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     htd2.addFamily(cf1);
     htd2.addFamily(cf2);
 
+    // Create table2 in Hbase
+    HTableDescriptor htd3 = hbaseTestingUtil.createTableDescriptor(TABLE_NAME_3);
+    htd3.addFamily(cf1);
+    htd3.addFamily(cf2);
+
     // Enables replication to all peers, including CBT
     cf1.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
     cf2.setScope(HConstants.REPLICATION_SCOPE_GLOBAL);
     hbaseTestingUtil.getHBaseAdmin().createTable(htd);
     hbaseTestingUtil.getHBaseAdmin().createTable(htd2);
+    hbaseTestingUtil.getHBaseAdmin().createTable(htd3);
+
 
     // Setup Bigtable Emulator
     // Create the copy of HBase table in CBT. Replication will copy data into this "copy" CBT table.
@@ -120,6 +151,8 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
         .createTable(CreateTableRequest.of("replication-test").addFamily("cf1").addFamily("cf2"));
     tableAdminClient
         .createTable(CreateTableRequest.of(TABLE_NAME_2).addFamily("cf1").addFamily("cf2"));
+    tableAdminClient
+        .createTable(CreateTableRequest.of(TABLE_NAME_3).addFamily("cf1").addFamily("cf2"));
     cbtConnection = BigtableConfiguration.connect(conf);
 
     // Setup Replication in HBase mini cluster
@@ -165,7 +198,6 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
     // TODO Find a better alternative than sleeping? Maybe disable replication or turnoff mini cluster
     Thread.sleep(2000);
     //   Waiter.waitFor(CONF, 60000, () -> TestEndpoint.getEntries().size() >= cellNum);
-
     Table cbtTable = cbtConnection.getTable(TableName.valueOf(TABLE_NAME));
     int i =0;
     assertResultRowsInCBT(cbtTable, 10, 0);
@@ -206,8 +238,18 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
   //TODO create a multi column family
   @Test
   public void testMultiTableReplication() throws IOException, InterruptedException {
+    CloudBigtableTableReplicator ts1 = new TestTableReplicator(TABLE_NAME, cbtConnection, countDownLatch);
+    CloudBigtableTableReplicator ts2 = new TestTableReplicator(TABLE_NAME, cbtConnection, countDownLatch);
+    CloudBigtableTableReplicator ts3 = new TestTableReplicator(TABLE_NAME, cbtConnection, countDownLatch);
+
+    Mockito.when(replicatorFactory.getReplicator(TABLE_NAME)).thenReturn(ts1);
+    Mockito.when(replicatorFactory.getReplicator(TABLE_NAME_2)).thenReturn(ts2);
+    Mockito.when(replicatorFactory.getReplicator(TABLE_NAME_3)).thenReturn(ts3);
+
     Table table1 = hbaseTestingUtil.getConnection().getTable(TableName.valueOf(TABLE_NAME));
     Table table2 = hbaseTestingUtil.getConnection().getTable(TableName.valueOf(TABLE_NAME_2));
+    Table table3 = hbaseTestingUtil.getConnection().getTable(TableName.valueOf(TABLE_NAME_3));
+
     for (int i = 0; i < 10; i++) {
       String rowKey = ROW_KEY_PREFIX + i;
       Put put = new Put(rowKey.getBytes());
@@ -215,6 +257,7 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
       put.addColumn(CF1, COL_QUALIFIER, 0, val);
       table1.put(put);
       table2.put(put);
+      table3.put(put);
     }
 
     // Wait for replication to catch up
@@ -224,25 +267,42 @@ public class HbaseToCloudBigtableReplicationEndpointTest {
 
     Table cbtTable = cbtConnection.getTable(TableName.valueOf(TABLE_NAME));
     Table cbtTable2 = cbtConnection.getTable(TableName.valueOf(TABLE_NAME_2));
+    Table cbtTable3 = cbtConnection.getTable(TableName.valueOf(TABLE_NAME_3));
     assertResultRowsInCBT(cbtTable, 10, 0);
-    assertResultRowsInCBT(cbtTable, 10, 0);
+    assertResultRowsInCBT(cbtTable2, 10, 0);
+    assertResultRowsInCBT(cbtTable3, 10, 0);
   }
 
-  private void assertResultRowsInCBT(Table table, int rowRange, int rowStart) throws IOException {
+  private void assertResultRowsInCBT(Table table, int rowRange, int start) throws IOException {
+    int i = start;
     for(Result result: table.getScanner(new Scan())){
       LOG.error("Processing result: " + Bytes.toStringBinary(result.getRow()) + " cell: " + result.listCells().get(0).toString());
       List<Cell> returnedCells = result.listCells();
-      Assert.assertEquals(0, Bytes.compareTo(result.getRow(), (ROW_KEY_PREFIX + rowStart).getBytes()));
+      Assert.assertEquals(0, Bytes.compareTo(result.getRow(), (ROW_KEY_PREFIX + i).getBytes()));
       // Only 1 cell/row added in  HBase
       Assert.assertEquals(1, returnedCells.size());
       // Assert on cell contents
       Assert.assertEquals(0, Bytes.compareTo(
           CellUtil.cloneFamily(returnedCells.get(0)), CF1));
       Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneQualifier(returnedCells.get(0)), COL_QUALIFIER));
-      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + rowStart).getBytes()));
-      rowStart++;
+      Assert.assertEquals(0, Bytes.compareTo(CellUtil.cloneValue(returnedCells.get(0)), (VALUE_PREFIX + i).getBytes()));
+      i++;
     }
-    Assert.assertEquals(rowRange, rowStart);
+    Assert.assertEquals(rowRange, i);
   }
 
+public class TestTableReplicator extends CloudBigtableTableReplicator {
+  private final CountDownLatch countDownLatch;
+  public TestTableReplicator(String tableName, Connection connection, CountDownLatch countDownLatch) throws IOException, InterruptedException {
+    super(tableName, connection);
+    this.countDownLatch = countDownLatch;
+  }
+
+  @Override
+  public boolean replicateTable(List<WAL.Entry> walEntriesToReplicate) throws IOException, InterruptedException {
+    countDownLatch.countDown();
+    countDownLatch.await();
+    return super.replicateTable(walEntriesToReplicate);
+  }
+}
 }

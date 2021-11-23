@@ -1,18 +1,3 @@
-/*
- * Copyright 2015 Google Inc.
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
 package com.google.cloud.bigtable.hbase.replication;
 
 import static java.util.stream.Collectors.groupingBy;
@@ -20,9 +5,11 @@ import static java.util.stream.Collectors.groupingBy;
 import com.google.cloud.bigtable.hbase.BigtableConfiguration;
 import com.google.cloud.bigtable.metrics.BigtableClientMetrics;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import org.apache.hadoop.conf.Configuration;
@@ -35,17 +22,21 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndpoint {
-
   private static final Logger LOG =
       LoggerFactory.getLogger(HbaseToCloudBigtableReplicationEndpoint.class);
   // TODO: Clean up the debugging code
   private static final AtomicLong concurrentReplications = new AtomicLong();
+  // threadPoolSize for table writes
+  private static final Integer threadPoolSize= 8;
 
   // Config keys to access project id and instance id from.
   private static final String PROJECT_KEY = "google.bigtable.project.id";
   private static final String INSTANCE_KEY = "google.bigtable.instance.id";
   private static String projectId;
   private static String instanceId;
+
+  //
+  private static final ExecutorService executor = Executors.newFixedThreadPool(threadPoolSize);
 
   /**
    * Bigtable connection owned by this class and shared by all the instances of this class. DO NOT
@@ -100,7 +91,6 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
   protected synchronized void doStart() {
     LOG.error("Starting replication to CBT. ",
         new RuntimeException("Dummy exception for stacktrace."));
-
     getOrCreateBigtableConnection(ctx.getConfiguration());
     replicatorFactory = new CloudBigtableTableReplicatorFactory(connection);
     notifyStarted();
@@ -165,23 +155,38 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
           entries.stream()
               .collect(groupingBy(entry -> entry.getKey().getTablename().getNameAsString()));
 
-      walEntriesByTable.entrySet().parallelStream().forEach(walEntries -> {
-        final String tableName = walEntries.getKey();
+      // create of list of futures
+      List<Future<Boolean>> results = new ArrayList<>();
+
+      for (Map.Entry<String, List<WAL.Entry>> walEntriesForTable: walEntriesByTable.entrySet()) {
+        final String tableName = walEntriesForTable.getKey();
+        // callables scheduled in executor
+        Future<Boolean> submit = executor.submit(new Callable<Boolean>() {
+          @Override
+          public Boolean call() throws IOException, InterruptedException {
+            return replicatorFactory.getReplicator(tableName)
+                .replicateTable(walEntriesForTable.getValue());
+          }
+        });
+        results.add(submit);
+      }
+
+      for (Future<Boolean> res: results) {
         try {
-          boolean res = replicatorFactory.getReplicator(tableName)
-              .replicateTable(walEntries.getValue());
-          if (!res) {
+          boolean result = res.get();
+          if (!result) {
             LOG.error(
-                "Table replicator returned false in CBT replicate. " + tableName + " failed.");
+                "Table replicator returned false in CBT replicate. " + " failed.");
           }
           // The overall operation is successful only if all the calls are successful.
-          succeeded.set(res & succeeded.get());
-        } catch (IOException e) {
-          LOG.error("Got IOException from table replicator: ", e);
+          succeeded.set(result & succeeded.get());
+        } catch (InterruptedException| ExecutionException e) {
+          e.printStackTrace();
+          LOG.error("Got Exception when evaluating table replicator result");
           // Suppress the exception here and return false to the replication machinery.
           succeeded.set(false);
         }
-      });
+      }
     } catch (Exception e) {
       LOG.error("Failed to replicate some  WAL with exception: ", e);
       succeeded.set(false);

@@ -202,7 +202,7 @@ public class CloudBigtableTableReplicator {
    *
    * @return true if replication was successful, false otherwise.
    */
-  public boolean replicateTable(List<WAL.Entry> walEntriesToReplicate) throws IOException {
+  public boolean replicateTable(List<WAL.Entry> walEntriesToReplicate) throws IOException, InterruptedException {
     boolean succeeded = true;
     // Collect all the cells to replicate in this call.
     // To guarantee the atomic update for the same WAL edit, it needs to be flushed before starting
