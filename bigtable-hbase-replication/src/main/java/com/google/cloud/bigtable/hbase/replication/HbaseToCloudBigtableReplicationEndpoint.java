@@ -28,6 +28,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.replication.BaseReplicationEndpoint;
+import org.apache.hadoop.hbase.util.EnvironmentEdgeManager;
 import org.apache.hadoop.hbase.wal.WAL;
 import org.apache.log4j.Level;
 import org.apache.log4j.LogManager;
@@ -140,7 +141,7 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
   @Override
   public boolean replicate(ReplicateContext replicateContext) {
 
-    long startTime = System.currentTimeMillis();
+    long startTime = EnvironmentEdgeManager.currentTime();
     List<WAL.Entry> entries = replicateContext.getEntries();
     long concurrent = concurrentReplications.incrementAndGet();
     LOG.error(
@@ -190,7 +191,7 @@ public class HbaseToCloudBigtableReplicationEndpoint extends BaseReplicationEndp
     } finally {
       LOG.error(
           "Exiting CBT replicate method after {} ms, Succeeded: {}",
-          (System.currentTimeMillis() - startTime),
+          (EnvironmentEdgeManager.currentTime() - startTime),
           succeeded.get());
       concurrentReplications.getAndDecrement();
     }
