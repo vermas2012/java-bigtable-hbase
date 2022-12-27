@@ -48,13 +48,19 @@ import java.util.concurrent.TimeUnit;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.util.ByteRange;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.SimpleByteRange;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class CloudBigtableReplicator {
+
+  public static final byte[] SOURCE_HBASE_QUALIFIER = "SOURCE_HBASE".getBytes(
+      StandardCharsets.UTF_8);
+  public static final byte[] SOURCE_CBT_QUALIFIER = "SOURCE_CBT".getBytes(StandardCharsets.UTF_8);
 
   private static final Logger LOG = LoggerFactory.getLogger(CloudBigtableReplicator.class);
 
@@ -271,6 +277,15 @@ public class CloudBigtableReplicator {
 
     for (BigtableWALEntry walEntry : walEntries) {
 
+      // TODO(vermas2012@) Flag protect the loop prevention logic.
+      Cell lastCell = walEntry.getCells().get(walEntry.getCells().size() - 1);
+      if (Arrays.equals(CellUtil.cloneQualifier(lastCell), SOURCE_CBT_QUALIFIER)) {
+        // Prevent a loop, this WAL is coming from CBT, we don't want to replicate it back to source
+        LOG.debug("Dropping WAL entry as it came from CBT , Row key: " +
+            Bytes.toString(CellUtil.cloneRow(lastCell)));
+        continue;
+      }
+
       // Translate the incompatible mutations.
       List<Cell> compatibleCells = incompatibleMutationAdapter.adaptIncompatibleMutations(walEntry);
       cellsToReplicateForTable.addAll(compatibleCells);
@@ -301,6 +316,16 @@ public class CloudBigtableReplicator {
     Map<ByteRange, List<Cell>> batchToReplicate = new HashMap<>();
     int numCellsInBatch = 0;
     for (Map.Entry<ByteRange, List<Cell>> rowCells : cellsToReplicateByRow.entrySet()) {
+
+      Cell lastCell = rowCells.getValue().get(rowCells.getValue().size() - 1);
+
+      // TODO(vermas2012@) Flag protect the loop prevention logic.
+      // Add a delete marker on SOUCE_HBASE qualifier, this acts as a source tag for bidirectional
+      // replication. CBT CDC will look at this delete marker and skip replicating the WAL to HBase
+      // TODO fix the timestamp to be a constant
+      Cell sourceHbaseMarker = new KeyValue(rowCells.getKey().getBytes(),
+          CellUtil.cloneFamily(lastCell), SOURCE_HBASE_QUALIFIER, 0l, KeyValue.Type.Delete);
+      rowCells.getValue().add(sourceHbaseMarker);
 
       // TODO handle the case where a single row has >100K mutations (very rare, but should not
       // fail)

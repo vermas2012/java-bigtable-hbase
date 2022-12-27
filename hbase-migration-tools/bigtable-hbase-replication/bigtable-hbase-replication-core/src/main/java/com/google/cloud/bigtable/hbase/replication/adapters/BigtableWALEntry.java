@@ -27,6 +27,7 @@ import org.apache.hadoop.hbase.Cell;
 @InternalApi
 public class BigtableWALEntry {
   private final long walWriteTimestamp;
+  // Expect an Arraylist.
   private final List<Cell> cells;
   private final String tableName;
 
