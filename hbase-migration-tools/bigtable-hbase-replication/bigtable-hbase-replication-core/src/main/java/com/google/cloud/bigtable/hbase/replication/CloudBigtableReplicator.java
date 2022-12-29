@@ -53,6 +53,7 @@ import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.util.ByteRange;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.SimpleByteRange;
+import org.mortbay.log.Log;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -62,7 +63,12 @@ public class CloudBigtableReplicator {
       StandardCharsets.UTF_8);
   public static final byte[] SOURCE_CBT_QUALIFIER = "SOURCE_CBT".getBytes(StandardCharsets.UTF_8);
 
+  public static String HBASE_SOURCE_REPLICATED = "cbt_replication_hbase_source_replicated";
+  public static String CBT_SOURCE_DROPPED = "cbt_replication_cbt_source_dropped";
+
   private static final Logger LOG = LoggerFactory.getLogger(CloudBigtableReplicator.class);
+
+  private MetricsExporter metricsExporter = null;
 
   /**
    * Shared resources for all CloudBigtableReplicator objects. Everything here is shared with all
@@ -203,6 +209,7 @@ public class CloudBigtableReplicator {
     LOG.info("Starting replication to CBT.");
 
     SharedResources sharedResources = SharedResources.getInstance(configuration);
+    this.metricsExporter = metricsExporter;
     IncompatibleMutationAdapter incompatibleMutationAdapter =
         new IncompatibleMutationAdapterFactory(
                 configuration, metricsExporter, sharedResources.connection)
@@ -271,6 +278,8 @@ public class CloudBigtableReplicator {
 
   private List<Future<Boolean>> replicateTable(
       String tableName, List<BigtableWALEntry> walEntries) {
+
+    Log.info("Replicating table " +  tableName + " with " + walEntries.size() + " WAL entries");
     List<Future<Boolean>> futures = new ArrayList<>();
     List<Cell> cellsToReplicateForTable = new ArrayList<>();
     int batchSizeInBytes = 0;
@@ -281,9 +290,19 @@ public class CloudBigtableReplicator {
       Cell lastCell = walEntry.getCells().get(walEntry.getCells().size() - 1);
       if (Arrays.equals(CellUtil.cloneQualifier(lastCell), SOURCE_CBT_QUALIFIER)) {
         // Prevent a loop, this WAL is coming from CBT, we don't want to replicate it back to source
-        LOG.debug("Dropping WAL entry as it came from CBT , Row key: " +
+        LOG.trace("Dropping WAL entry as it came from CBT , Row key: " +
             Bytes.toString(CellUtil.cloneRow(lastCell)));
+        if(metricsExporter!= null ){
+          metricsExporter.incCounters(CBT_SOURCE_DROPPED, 1);
+        }
         continue;
+      } else {
+        LOG.trace("Replicating WAL entry as it originated on HBase , Row key: " +
+            Bytes.toString(CellUtil.cloneRow(lastCell)));
+        if(metricsExporter != null){
+          metricsExporter.incCounters(HBASE_SOURCE_REPLICATED, 1
+          );
+        }
       }
 
       // Translate the incompatible mutations.
@@ -323,7 +342,7 @@ public class CloudBigtableReplicator {
       // Add a delete marker on SOUCE_HBASE qualifier, this acts as a source tag for bidirectional
       // replication. CBT CDC will look at this delete marker and skip replicating the WAL to HBase
       // TODO fix the timestamp to be a constant
-      Cell sourceHbaseMarker = new KeyValue(rowCells.getKey().getBytes(),
+      Cell sourceHbaseMarker = new KeyValue(CellUtil.cloneRow(lastCell),
           CellUtil.cloneFamily(lastCell), SOURCE_HBASE_QUALIFIER, 0l, KeyValue.Type.Delete);
       rowCells.getValue().add(sourceHbaseMarker);
 
